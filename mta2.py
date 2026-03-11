@@ -7,13 +7,16 @@
 #  - argcomplete
 #  - PyYaml
 #
+from pathlib import Path
 import argparse
+import copy
 import csv
 import io
 import json
 import logging
 import sys
-from pathlib import Path
+import argcomplete
+import yaml
 
 logging.basicConfig(
     filename='mta2.log',
@@ -23,8 +26,149 @@ logging.basicConfig(
 )
 
 
-class MtaResultCollator:
+class MtaResultToCsv:
     logger = logging.getLogger("MtaResultCollator")
+
+    @classmethod
+    def __readMtaResults(cls, mtaFile):
+        cls.logger.info("Reading MTA Results.")
+
+        mtaResults = None
+        if mtaFile == "-":
+            cls.logger.info("Reading MTA Results from stdin.")
+            full_input = sys.stdin.read()
+            mtaResults = yaml.safe_load(full_input)
+        else:
+            cls.logger.info("Getting MTA Results from file: %s", mtaFile)
+            with open(mtaFile, "r") as inFile:
+                mtaResults = yaml.safe_load(inFile)
+        cls.logger.info("Done Reading MTA Results.")
+        return mtaResults
+
+    @classmethod
+    def __deduplicate(cls):
+        cls.logger.info("Deduplicating MTA Results.")
+
+        out = []
+
+    @classmethod
+    def __mtaToCsv(cls, mtaResults: list, header=True) -> str:
+        cls.logger.info("Converting MTA Results to CSV.")
+
+        output = io.StringIO()
+        data = []
+        dedup = {}
+
+        for curResult in mtaResults:
+            cls.logger.info("Processing result: %s", curResult["name"])
+
+            curTarget = {
+                "name": curResult["name"],
+                "description": curResult["description"]
+            }
+
+            for curViolationName, curViolationDict in curResult.get("violations", {}).items():
+                violation = copy.deepcopy(curTarget)
+
+                violation["violation"] = curViolationName
+                violation["effort"] = curViolationDict.get("effort", "")
+                violation["category"] = curViolationDict.get("category", "")
+                violation["labels"] = ",".join(curViolationDict.get("labels", []))
+
+                for curIncident in curViolationDict.get("incidents", []):
+                    file = curIncident.get("uri", "")
+                    lineNumber = curIncident.get("lineNumber", "-")
+                    #dedup key to reference a single file with this particular violation
+                    dedupKey = violation["name"] + violation['violation'] + file
+
+                    if dedupKey in dedup.keys():
+                        dedup[dedupKey]['lineNumbers'] += ","+str(lineNumber)
+                    else:
+                        violationOut = copy.deepcopy(violation)
+                        violationOut['file'] = file
+                        violationOut['lineNumbers'] = str(lineNumber)
+
+                        data.append(violationOut)
+                        dedup[dedupKey] = violationOut
+
+        del dedup
+
+        cls.logger.info("Num results: %d", len(data))
+
+        writer = csv.DictWriter(
+            output,
+            extrasaction='ignore',
+            fieldnames=[
+                "name",
+                "description",
+                "violation",
+                "effort",
+                "category",
+                "labels",
+                "file",
+                "lineNumbers",
+                "false positive",
+                "explanation"
+            ],
+        )
+        if header:
+            writer.writeheader()
+        writer.writerows(data)
+        output = output.getvalue()
+
+        cls.logger.info("Done Converting MTA Results to CSV.")
+        return output
+
+    @classmethod
+    def processMtaResultsFiles(cls, mtaFile:str, outFile:str="-", header=True):
+        cls.logger.info("Processing MTA Results.")
+
+        output = cls.__readMtaResults(mtaFile)
+        output = cls.__mtaToCsv(output, header)
+
+        if outFile == "-":
+            cls.logger.info("Writing to stdout.")
+            print(output)
+        else:
+            cls.logger.info("Writing to file: %s", outFile)
+            with open(outFile, "w") as outFileFd:
+                outFileFd.write(output)
+            print(outFile)
+        cls.logger.info("Done processing MTA Results.")
+
+    @classmethod
+    def processFromArgs(cls, args):
+        """
+        Route to call from argparse arguments.
+        :param args:
+        :return:
+        """
+        cls.logger.info("Processing from args.")
+
+        try:
+            cls.processMtaResultsFiles(
+                mtaFile=args.mtaFile,
+                outFile=args.outFile,
+                header=not args.noHeader,
+            )
+        except Exception as e:
+            cls.logger.exception("FAILED to process dependency trees: ")
+            print(
+                "FAILED to process dependency trees. See log for more details. Error: ",
+                e,
+                file=sys.stderr
+            )
+            exit(2)
+
+    @classmethod
+    def setupArgParse(cls, argParserSubcommands) -> None:
+        recurseParser = argParserSubcommands.add_parser("mtaResultToCsv", help="Just run MTA results to csv.")
+
+        recurseParser.add_argument("mtaFile", help="MTA results yaml file to process. '-' to get from stdin.").completer=argcomplete.completers.FilesCompleter()
+        recurseParser.add_argument("--outFile", dest="outFile", nargs="?", default="-", help="File to output to. '-'(default) to output from stdout.").completer=argcomplete.completers.FilesCompleter()
+        recurseParser.add_argument("--noHeader", dest="noHeader", action="store_true", help="If this should not add csv headers to the resulting CSV document.")
+
+        recurseParser.set_defaults(func=cls.processFromArgs)
 
 
 class DepTreeCollator:
@@ -36,7 +180,7 @@ class DepTreeCollator:
     logger = logging.getLogger("DepTreeCollator")
 
     @classmethod
-    def readTreeFiles(cls, fileName: str, directory: str = ".") -> dict:
+    def __readTreeFiles(cls, fileName: str, directory: str = ".") -> dict:
         """
         Reads all dependency tree files in directory given.
 
@@ -76,7 +220,7 @@ class DepTreeCollator:
         return output
 
     @classmethod
-    def processChild(cls, output: dict, file: str, child: dict) -> None:
+    def __processChild(cls, output: dict, file: str, child: dict) -> None:
         """
         Recursive call to process dependencies and their sub-dependencies (children)
         :param output: The main output dependency dict we are adding to
@@ -99,10 +243,10 @@ class DepTreeCollator:
 
         if "children" in child:
             for curSubChild in child["children"]:
-                cls.processChild(output, file, curSubChild)
+                cls.__processChild(output, file, curSubChild)
 
     @classmethod
-    def collateDeps(cls, depTrees: dict) -> dict:
+    def __collateDeps(cls, depTrees: dict) -> dict:
         """
         Collated the raw dependencies from :meth:`.readTreeFiles`.
 
@@ -129,7 +273,7 @@ class DepTreeCollator:
 
             if "children" in depTree:
                 for curSubChild in depTree["children"]:
-                    cls.processChild(output, curFile, curSubChild)
+                    cls.__processChild(output, curFile, curSubChild)
             else:
                 cls.logger.info("File had no dependencies.")
         # sort results
@@ -139,7 +283,7 @@ class DepTreeCollator:
         return output
 
     @classmethod
-    def outputResult(cls, deps, outFile: str, outFormat: str = "-") -> None:
+    def __outputResult(cls, deps, outFile: str, outFormat: str = "-") -> None:
         """
         Outputs the results to a file/stream
         :param deps: The dependencies to output
@@ -198,7 +342,8 @@ class DepTreeCollator:
         cls.logger.info("Done outputting results.")
 
     @classmethod
-    def process(cls, fileName: str = "depTree.json", directory: str = ".", outFile: str | None = None, outFormat: str = "-") -> dict:
+    def process(cls, fileName: str = "depTree.json", directory: str = ".", outFile: str | None = None,
+                outFormat: str = "-") -> dict:
         """
         Processes a directory for their dependencies. Collates them into an organized dict of individual, unique dependencies.
 
@@ -210,33 +355,51 @@ class DepTreeCollator:
         """
         cls.logger.info("Processing dependency tree.")
 
-        deps = cls.readTreeFiles(fileName, directory=directory)
-        deps = cls.collateDeps(deps)
+        deps = cls.__readTreeFiles(fileName, directory=directory)
+        deps = cls.__collateDeps(deps)
         if outFile is not None:
-            cls.outputResult(deps, outFile, outFormat)
+            cls.__outputResult(deps, outFile, outFormat)
 
         cls.logger.info("Done processing dependency tree.")
         return deps
 
     @classmethod
     def processFromArgs(cls, args):
+        """
+        Route to call from argparse arguments.
+        :param args:
+        :return:
+        """
         cls.logger.info("Processing from args.")
 
-        cls.process(
-            fileName=args.inFileName,
-            directory=args.directory,
-            outFile=args.outFile,
-            outFormat=args.outFormat,
-        )
+        try:
+            cls.process(
+                fileName=args.inFileName,
+                directory=args.directory,
+                outFile=args.outFile,
+                outFormat=args.outFormat,
+            )
+        except Exception as e:
+            cls.logger.exception("FAILED to process dependency trees: ")
+            print(
+                "FAILED to process dependency trees. See log for more details. Error: ",
+                e,
+                file=sys.stderr
+            )
+            exit(2)
 
     @classmethod
     def setupArgParse(cls, argParserSubcommands) -> None:
         recurseParser = argParserSubcommands.add_parser("depTreeCollate", help="Just run dependency tree collation.")
 
-        recurseParser.add_argument("--directory", dest="directory", nargs="?", default=".", help="The directory to search for dep tree files in. Defaults to current directory '.'.")
-        recurseParser.add_argument("--inFileName", dest="inFileName", nargs="?", default="depTree.json", help="The file name to search form. Expects JSON files only. Defaults to 'depTree.json'.")
-        recurseParser.add_argument("--outFormat", dest="outFormat", nargs="?", default="-", help="The format to output with. Accepts '-' (default, determines based on file extension of out file), 'json', or 'csv'")
-        recurseParser.add_argument("--outFile", dest="outFile", nargs="?", default="-", help="The file to output to. '-'(default) to output to stdout.")
+        recurseParser.add_argument("--directory", dest="directory", nargs="?", default=".",
+                                   help="The directory to search for dep tree files in. Defaults to current directory '.'.")
+        recurseParser.add_argument("--inFileName", dest="inFileName", nargs="?", default="depTree.json",
+                                   help="The file name to search form. Expects JSON files only. Defaults to 'depTree.json'.")
+        recurseParser.add_argument("--outFormat", dest="outFormat", nargs="?", default="-",
+                                   help="The format to output with. Accepts '-' (default, determines based on file extension of out file), 'json', or 'csv'")
+        recurseParser.add_argument("--outFile", dest="outFile", nargs="?", default="-",
+                                   help="The file to output to. '-'(default) to output to stdout.")
 
         recurseParser.set_defaults(func=cls.processFromArgs)
 
@@ -265,11 +428,13 @@ argParser = argparse.ArgumentParser(
 )
 subCommands = argParser.add_subparsers(dest='command', help='Subcommands')
 
+MtaResultToCsv.setupArgParse(subCommands)
 DepTreeCollator.setupArgParse(subCommands)
 RecMta.setupArgParse(subCommands)
 
-
+argcomplete.autocomplete(argParser)
 args = argParser.parse_args()
+
 
 if hasattr(args, "func"):
     args.func(args)
