@@ -18,13 +18,13 @@ from pathlib import Path
 logging.basicConfig(
     filename='mta2.log',
     filemode='w',
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',  # Use %(name)s
+    format='[%(asctime)s][%(name)-17s][%(levelname)-5s] %(message)s',  # Use %(name)s
     level=logging.DEBUG
 )
 
 
 class MtaResultCollator:
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger("MtaResultCollator")
 
 
 class DepTreeCollator:
@@ -33,7 +33,7 @@ class DepTreeCollator:
 
     "Main" method is "process"
     """
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger("DepTreeCollator")
 
     @classmethod
     def readTreeFiles(cls, fileName: str, directory: str = ".") -> dict:
@@ -218,18 +218,61 @@ class DepTreeCollator:
         cls.logger.info("Done processing dependency tree.")
         return deps
 
+    @classmethod
+    def processFromArgs(cls, args):
+        cls.logger.info("Processing from args.")
+
+        cls.process(
+            fileName=args.inFileName,
+            directory=args.directory,
+            outFile=args.outFile,
+            outFormat=args.outFormat,
+        )
+
+    @classmethod
+    def setupArgParse(cls, argParserSubcommands) -> None:
+        recurseParser = argParserSubcommands.add_parser("depTreeCollate", help="Just run dependency tree collation.")
+
+        recurseParser.add_argument("--directory", dest="directory", nargs="?", default=".", help="The directory to search for dep tree files in. Defaults to current directory '.'.")
+        recurseParser.add_argument("--inFileName", dest="inFileName", nargs="?", default="depTree.json", help="The file name to search form. Expects JSON files only. Defaults to 'depTree.json'.")
+        recurseParser.add_argument("--outFormat", dest="outFormat", nargs="?", default="-", help="The format to output with. Accepts '-' (default, determines based on file extension of out file), 'json', or 'csv'")
+        recurseParser.add_argument("--outFile", dest="outFile", nargs="?", default="-", help="The file to output to. '-'(default) to output to stdout.")
+
+        recurseParser.set_defaults(func=cls.processFromArgs)
+
 
 class GitPuller:
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger("GitPuller")
 
 
 class RecMta:
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger("RecMta")
+
+    @classmethod
+    def doRecurseFromArgs(cls, args):
+        cls.logger.info("Starting recursive process.")
+
+    @classmethod
+    def setupArgParse(cls, argParserSubcommands) -> None:
+        recurseParser = argParserSubcommands.add_parser("recurse", help="Run full recursive MTA runner.")
+
+        recurseParser.set_defaults(func=cls.doRecurseFromArgs)
 
 
 argParser = argparse.ArgumentParser(
     # prog='mta2',
     description='Recursive MTA Runner',
 )
+subCommands = argParser.add_subparsers(dest='command', help='Subcommands')
+
+DepTreeCollator.setupArgParse(subCommands)
+RecMta.setupArgParse(subCommands)
+
 
 args = argParser.parse_args()
+
+if hasattr(args, "func"):
+    args.func(args)
+else:
+    print("ERROR: No command specified.", file=sys.stderr)
+    argParser.print_help()
