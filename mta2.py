@@ -7,6 +7,7 @@
 #  - argcomplete
 #  - PyYaml
 #
+import time
 from pathlib import Path
 import argparse
 import copy
@@ -17,14 +18,45 @@ import logging
 import sys
 import argcomplete
 import yaml
+from anyio import sleep
 
 logging.basicConfig(
     filename='mta2.log',
     filemode='w',
-    format='[%(asctime)s][%(name)-17s][%(levelname)-5s] %(message)s',  # Use %(name)s
+    format='[%(asctime)s][%(name)-15s][%(levelname)-5s] %(message)s',  # Use %(name)s
     level=logging.DEBUG
 )
 
+class InvalidInputException(ValueError):
+    """Raised when there is an invalid input given"""
+    pass
+
+class Utils:
+    logger = logging.getLogger("Utils")
+
+    @classmethod
+    def alertBell(cls, num:int=1, spacingSecs:float|bool=False)->None:
+        """
+        Sends a bell signal to stdout.
+        :param num: The number of times to send the bell
+        :param spacingSecs: The timing between the bell sounds
+        :return:
+        """
+        cls.logger.info("Sending bell alert %d/%s", num, spacingSecs)
+        for i in range(num):
+            sys.stdout.write('\a')
+            sys.stdout.flush()
+            if spacingSecs:
+                time.sleep(spacingSecs)
+        cls.logger.debug("Done sending bell alert.")
+
+    @classmethod
+    def alertUser(cls)->None:
+        """
+        Sends a standard "User alert" sound.
+        :return:
+        """
+        cls.alertBell(5, 0.5)
 
 class MtaResultToCsv:
     logger = logging.getLogger("MtaResultCollator")
@@ -152,9 +184,9 @@ class MtaResultToCsv:
                 header=not args.noHeader,
             )
         except Exception as e:
-            cls.logger.exception("FAILED to process dependency trees: ")
+            cls.logger.exception("FAILED to MTA results: ")
             print(
-                "FAILED to process dependency trees. See log for more details. Error: ",
+                "FAILED to MTA results. See log for more details. Error: ",
                 e,
                 file=sys.stderr
             )
@@ -207,7 +239,7 @@ class DepTreeCollator:
         if len(depTreeFiles) == 0:
             logging.error("No dependency tree files found")
             print("ERROR: No dependency tree files found.", file=sys.stderr)
-            raise "No dependency tree files found."
+            raise InvalidInputException("No dependency tree files found.")
 
         for curFile in depTreeFiles:
             cls.logger.info("Found file: " + curFile)
@@ -329,7 +361,7 @@ class DepTreeCollator:
         else:
             cls.logger.error("Unknown output format: %s", outFormat)
             print("ERROR: Unknown output format: " + outFormat)
-            raise "Unknown output format: " + outFormat
+            raise InvalidInputException("Unknown output format: " + outFormat)
 
         if outFile == "-":
             cls.logger.info("Outputting to stdout")
@@ -434,7 +466,6 @@ RecMta.setupArgParse(subCommands)
 
 argcomplete.autocomplete(argParser)
 args = argParser.parse_args()
-
 
 if hasattr(args, "func"):
     args.func(args)
