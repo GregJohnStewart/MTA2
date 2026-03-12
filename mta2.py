@@ -7,6 +7,8 @@
 #  - argcomplete
 #  - PyYaml
 #
+import os
+import subprocess
 import time
 from pathlib import Path
 import argparse
@@ -18,7 +20,6 @@ import logging
 import sys
 import argcomplete
 import yaml
-from anyio import sleep
 
 logging.basicConfig(
     filename='mta2.log',
@@ -27,15 +28,22 @@ logging.basicConfig(
     level=logging.DEBUG
 )
 
+
 class InvalidInputException(ValueError):
     """Raised when there is an invalid input given"""
     pass
+
+
+class CmdFailedException(Exception):
+    """Raised when a subcommand process fails"""
+    pass
+
 
 class Utils:
     logger = logging.getLogger("Utils")
 
     @classmethod
-    def alertBell(cls, num:int=1, spacingSecs:float|bool=False)->None:
+    def alertBell(cls, num: int = 1, spacingSecs: float | bool = False) -> None:
         """
         Sends a bell signal to stdout.
         :param num: The number of times to send the bell
@@ -51,12 +59,13 @@ class Utils:
         cls.logger.debug("Done sending bell alert.")
 
     @classmethod
-    def alertUser(cls)->None:
+    def alertUser(cls) -> None:
         """
         Sends a standard "User alert" sound.
         :return:
         """
         cls.alertBell(5, 0.5)
+
 
 class MtaResultToCsv:
     logger = logging.getLogger("MtaResultCollator")
@@ -110,11 +119,11 @@ class MtaResultToCsv:
                 for curIncident in curViolationDict.get("incidents", []):
                     file = curIncident.get("uri", "")
                     lineNumber = curIncident.get("lineNumber", "-")
-                    #dedup key to reference a single file with this particular violation
+                    # dedup key to reference a single file with this particular violation
                     dedupKey = violation["name"] + violation['violation'] + file
 
                     if dedupKey in dedup.keys():
-                        dedup[dedupKey]['lineNumbers'] += ","+str(lineNumber)
+                        dedup[dedupKey]['lineNumbers'] += "," + str(lineNumber)
                     else:
                         violationOut = copy.deepcopy(violation)
                         violationOut['file'] = file
@@ -152,7 +161,7 @@ class MtaResultToCsv:
         return output
 
     @classmethod
-    def processMtaResultsFiles(cls, mtaFile:str, outFile:str="-", header=True):
+    def processMtaResultsFiles(cls, mtaFile: str, outFile: str = "-", header=True):
         cls.logger.info("Processing MTA Results.")
 
         output = cls.__readMtaResults(mtaFile)
@@ -196,9 +205,12 @@ class MtaResultToCsv:
     def setupArgParse(cls, argParserSubcommands) -> None:
         recurseParser = argParserSubcommands.add_parser("mtaResultToCsv", help="Just run MTA results to csv.")
 
-        recurseParser.add_argument("mtaFile", help="MTA results yaml file to process. '-' to get from stdin.").completer=argcomplete.completers.FilesCompleter()
-        recurseParser.add_argument("--outFile", dest="outFile", nargs="?", default="-", help="File to output to. '-'(default) to output from stdout.").completer=argcomplete.completers.FilesCompleter()
-        recurseParser.add_argument("--noHeader", dest="noHeader", action="store_true", help="If this should not add csv headers to the resulting CSV document.")
+        recurseParser.add_argument("mtaFile",
+                                   help="MTA results yaml file to process. '-' to get from stdin.").completer = argcomplete.completers.FilesCompleter()
+        recurseParser.add_argument("--outFile", dest="outFile", nargs="?", default="-",
+                                   help="File to output to. '-'(default) to output from stdout.").completer = argcomplete.completers.FilesCompleter()
+        recurseParser.add_argument("--noHeader", dest="noHeader", action="store_true",
+                                   help="If this should not add csv headers to the resulting CSV document.")
 
         recurseParser.set_defaults(func=cls.processFromArgs)
 
@@ -328,7 +340,7 @@ class DepTreeCollator:
         outStr = None
 
         if outFormat == "-":
-            if outFile.endswith(".json"):
+            if outFile.endswith(".json") or outFile == "-":
                 outFormat = "json"
             elif outFile.endswith(".csv"):
                 outFormat = "csv"
@@ -383,7 +395,7 @@ class DepTreeCollator:
         :param fileName: The name of the dependency tree output files in th directory.
         :param outFile:
         :param outFormat:
-        :return:
+        :return: The dict of dependencies used by this project
         """
         cls.logger.info("Processing dependency tree.")
 
@@ -436,16 +448,191 @@ class DepTreeCollator:
         recurseParser.set_defaults(func=cls.processFromArgs)
 
 
+class CommandUtils:
+    logger = logging.getLogger("CommandUtils")
+
+    @classmethod
+    def runCommand(
+            cls,
+            command: list[str],
+            outputDir: str,
+            runDir: str = "."
+    ) -> subprocess.CompletedProcess:
+        cls.logger.info("Running command: %s", command[0])
+        cls.logger.debug("Full command: %s", command)
+        initialD = os.getcwd()
+
+        result = None
+        try:
+            os.chdir(runDir)
+            result = subprocess.run(
+                command,
+                shell=False,
+                capture_output=True,
+                text=True,
+                check=False,
+
+            )
+        finally:
+            os.chdir(initialD)
+
+        outputFile = os.path.basename(command[0])
+        outputFile = os.path.join(outputDir, outputFile)
+
+        open(outputFile + ".stdout.log, ", "w").write(result.stdout)
+        open(outputFile + ".stderr.log, ", "w").write(result.stderr)
+
+        if result.returncode != 0:
+            raise CmdFailedException(
+                "FAILED to run command: %s" + command[0] +
+                ", exited with " + str(result.returncode) +
+                "  Output sent to logs in " + outputDir
+            )
+        return result
+
+
+class MvnUtils:
+    logger = logging.getLogger("MtaRunner")
+
+    @classmethod
+    def runDepTree(
+            cls,
+            projectDir: str,
+            outputDir: str,
+            depTreeMvnCmd: str = "org.apache.plugins:maven-dependency-plugin:3.8.1:tree"
+    ):
+        cls.logger.info("Running Mvn dependency tree for project %s", projectDir)
+        CommandUtils.runCommand(
+            [
+                "mvn", depTreeMvnCmd,
+                "-DoutputFile=depTree.json", "-DoutputType=json"
+            ],
+            outputDir
+        )
+        cls.logger.info("Done running Mvn dependency tree for project %s", projectDir)
+
+
+class MtaRunner:
+    logger = logging.getLogger("MtaRunner")
+
+    @classmethod
+    def runMta(
+            cls,
+            mtaLocation: str,
+            projectLocation: str,
+            outputDir: str,
+            mtaArgs: list[str]
+    ):
+        cls.logger.info("Running Mta on project %s / %s", projectLocation)
+
+        commandList = [
+                          "./mta-cli",
+                          "analyze"
+                          "--input", projectLocation,
+                          "--output", outputDir,
+                      ] + mtaArgs
+
+        CommandUtils.runCommand(commandList, outputDir, mtaLocation)
+
+        cls.logger.info("Finished running mta.")
+
+    @classmethod
+    def mtaArgsToList(cls, mtaArgs: str) -> list[str]:
+        return mtaArgs.split()
+
+
 class GitPuller:
     logger = logging.getLogger("GitPuller")
 
+
+class ProjectAnalysis:
+    logger = logging.getLogger("ProjectAnalysis")
+
+    @classmethod
+    def analyzeProject(
+            cls,
+            mtaLocation: str,
+            mtaArgs: list[str],
+            projectLocation: str,
+            outputDir: str,
+    ) -> dict:
+        cls.logger.info("Analyzing project: %s", projectLocation)
+
+        mtaResultsDir = os.path.join(outputDir, "mtaResults")
+
+        MtaRunner.runMta(
+            mtaLocation,
+            projectLocation,
+            mtaResultsDir,
+            mtaArgs
+        )
+
+        MtaResultToCsv.processMtaResultsFiles(
+            os.path.join(mtaResultsDir, ""),  # TODO
+            os.path.join(mtaResultsDir, "results.csv")
+        )
+
+        MvnUtils.runDepTree(projectLocation, outputDir)
+
+        dependencies = DepTreeCollator.process(
+            directory=projectLocation,
+            outFile=os.path.join(outputDir, "dependencies.json"),
+        )
+
+        cls.logger.info("Done analyzing project: %s", projectLocation)
+        return dependencies
 
 class RecMta:
     logger = logging.getLogger("RecMta")
 
     @classmethod
+    def doRecursiveProjectAnalysis(
+            cls,
+            mtaLocation: str,
+            mtaArgs: str,
+            startProject: str,
+            outputDir: str = "./mta2AnalysisResults",
+            projectGitMap: str = "./mta2ProjectGitMap.json",
+            pullLocation: str = "./mta2PulledProjects",
+            cleanupPulled: bool = False,
+    ):
+        # convert to use only absolute paths
+        mtaLocation = os.path.abspath(mtaLocation)
+        startProject = os.path.abspath(startProject)
+        outputDir = os.path.abspath(outputDir)
+        projectGitMap = os.path.abspath(projectGitMap)
+        pullLocation = os.path.abspath(pullLocation)
+        mtaArgs = MtaRunner.mtaArgsToList(mtaArgs)
+
+        cls.logger.info("Starting MTA recursive project analysis.")
+        cls.logger.info("\tMTA location: %s", mtaLocation)
+        cls.logger.info("\tStarting project location: %s", startProject)
+        cls.logger.info("\tOutput Directory: %s", outputDir)
+        cls.logger.info("\tProject git map: %s", projectGitMap)
+        cls.logger.info("\tProject pulling location: %s", pullLocation)
+        cls.logger.info("\tCleanup pulled projects?: %s", cleanupPulled)
+
+        # TODO:: check inputs, create if necessary
+        # TODO:: Do things
+
+        # initial project analysis
+        projectDeps = ProjectAnalysis.analyzeProject(
+            mtaLocation,
+            mtaArgs,
+            startProject,
+            os.path.join(outputDir, Path(startProject).name),
+        )
+        cls.logger.info("Finished initial project analysis.")
+
+        # TODO:: deal with project Deps, do recursive findings
+
+        cls.logger.info("Finished MTA recursive project analysis.")
+
+    @classmethod
     def doRecurseFromArgs(cls, args):
         cls.logger.info("Starting recursive process.")
+
+        cls.doRecursiveProjectAnalysis("", "")
 
     @classmethod
     def setupArgParse(cls, argParserSubcommands) -> None:
