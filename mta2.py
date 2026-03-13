@@ -209,8 +209,7 @@ class MtaResultToCsv:
                                    help="MTA results yaml file to process. '-' to get from stdin.").completer = argcomplete.completers.FilesCompleter()
         recurseParser.add_argument("--outFile", dest="outFile", nargs="?", default="-",
                                    help="File to output to. '-'(default) to output from stdout.").completer = argcomplete.completers.FilesCompleter()
-        recurseParser.add_argument("--noHeader", dest="noHeader", action="store_true",
-                                   help="If this should not add csv headers to the resulting CSV document.")
+        recurseParser.add_argument("--noHeader", dest="noHeader", action="store_true", help="If this should not add csv headers to the resulting CSV document.")
 
         recurseParser.set_defaults(func=cls.processFromArgs)
 
@@ -436,8 +435,7 @@ class DepTreeCollator:
     def setupArgParse(cls, argParserSubcommands) -> None:
         recurseParser = argParserSubcommands.add_parser("depTreeCollate", help="Just run dependency tree collation.")
 
-        recurseParser.add_argument("--directory", dest="directory", nargs="?", default=".",
-                                   help="The directory to search for dep tree files in. Defaults to current directory '.'.")
+        recurseParser.add_argument("--directory", dest="directory", nargs="?", default=".", help="The directory to search for dep tree files in. Defaults to current directory '.'.")
         recurseParser.add_argument("--inFileName", dest="inFileName", nargs="?", default="depTree.json",
                                    help="The file name to search form. Expects JSON files only. Defaults to 'depTree.json'.")
         recurseParser.add_argument("--outFormat", dest="outFormat", nargs="?", default="-",
@@ -613,7 +611,6 @@ class RecMta:
         cls.logger.info("\tCleanup pulled projects?: %s", cleanupPulled)
 
         # TODO:: check inputs, create if necessary
-        # TODO:: Do things
 
         # initial project analysis
         projectDeps = ProjectAnalysis.analyzeProject(
@@ -630,13 +627,32 @@ class RecMta:
 
     @classmethod
     def doRecurseFromArgs(cls, args):
-        cls.logger.info("Starting recursive process.")
+        cls.logger.info("Starting recursive process from args.")
 
-        cls.doRecursiveProjectAnalysis("", "")
+        #TODO:: this
+        cls.doRecursiveProjectAnalysis(
+            mtaLocation=args.mtaLocation,
+            mtaArgs=args.mtaArgs,
+            startProject=args.startProject,
+            outputDir=args.outputDir,
+            projectGitMap=args.projectGitMap,
+            pullLocation=args.pullLocation,
+            cleanupPulled=args.cleanupPulled,
+        )
 
     @classmethod
     def setupArgParse(cls, argParserSubcommands) -> None:
         recurseParser = argParserSubcommands.add_parser("recurse", help="Run full recursive MTA runner.")
+
+        recurseParser.add_argument("--startProject", dest="startProject", nargs="?", default=".", help="The directory of the project to start from. Defaults to '.'.")
+        recurseParser.add_argument("--outputDir", dest="outputDir", nargs="?", default="./mta2AnalysisResults", help="The directory to output results to. Defaults to './mta2AnalysisResults'.")
+
+        recurseParser.add_argument("--projectGitMap", dest="projectGitMap", nargs="?", default="./mta2ProjectGitMap.json", help="The map of project dependencies to git locations. Defaults to './mta2ProjectGitMap.json'.")
+        recurseParser.add_argument("--pullLocation", dest="pullLocation", nargs="?", default="./mta2PulledProjects", help="The directory to pull projects into. Defaults to './mta2PulledProjects'.")
+        recurseParser.add_argument("--cleanPulled", dest="cleanupPulled", action="store_true", help="If this should remove pulled projects after the run is complete.")
+
+        recurseParser.add_argument("--mtaLocation", dest="mtaLocation", help="The directory in which the MTA tool was extracted from.")
+        recurseParser.add_argument("--mtaArgs", dest="mtaArgs", help="The arguments to pass to the MTA tool when running.")
 
         recurseParser.set_defaults(func=cls.doRecurseFromArgs)
 
