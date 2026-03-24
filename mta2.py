@@ -460,29 +460,36 @@ class CommandUtils:
         cls.logger.debug("Full command: %s", command)
         initialD = os.getcwd()
 
+        outputFilePrefix = os.path.basename(command[0])
+        outputFilePrefix = os.path.join(outputDir, outputFilePrefix)
+
+        stdOutFile = outputFilePrefix + ".stdout.log"
+        stdErrFile = outputFilePrefix + ".stderr.log"
+
+        cls.logger.debug("Stdout going to file: %s", stdOutFile)
+        cls.logger.debug("Stderr going to file: %s", stdErrFile)
+
         result = None
         try:
             os.chdir(runDir)
-            result = subprocess.run(
-                command,
-                shell=False,
-                capture_output=True,
-                text=True,
-                check=False,
+            cls.logger.debug("Running command in %s", os.getcwd())
 
-            )
+            with open(stdOutFile, "w") as outFileD, open(stdErrFile, "w") as errFileD:
+                result = subprocess.run(
+                    command,
+                    stdout=outFileD,
+                    stderr=errFileD,
+                    shell=False,
+                    text=True,
+                    check=False,
+
+                )
         finally:
             os.chdir(initialD)
 
-        outputFile = os.path.basename(command[0])
-        outputFile = os.path.join(outputDir, outputFile)
-
-        open(outputFile + ".stdout.log, ", "w").write(result.stdout)
-        open(outputFile + ".stderr.log, ", "w").write(result.stderr)
-
         if result.returncode != 0:
             raise CmdFailedException(
-                "FAILED to run command: %s" + command[0] +
+                "FAILED to run command: " + command[0] +
                 ", exited with " + str(result.returncode) +
                 "  Output sent to logs in " + outputDir
             )
@@ -521,11 +528,12 @@ class MtaRunner:
             outputDir: str,
             mtaArgs: list[str]
     ):
-        cls.logger.info("Running Mta on project %s / %s", projectLocation)
+        cls.logger.info("Running Mta on project %s", projectLocation)
+        print("Running Mta on project (this can take some time):"+ projectLocation)
 
         commandList = [
                           "./mta-cli",
-                          "analyze"
+                          "analyze",
                           "--input", projectLocation,
                           "--output", outputDir,
                       ] + mtaArgs
@@ -557,6 +565,7 @@ class ProjectAnalysis:
         cls.logger.info("Analyzing project: %s", projectLocation)
 
         mtaResultsDir = os.path.join(outputDir, "mtaResults")
+        Path(mtaResultsDir).mkdir(parents=True, exist_ok=True)
 
         MtaRunner.runMta(
             mtaLocation,
@@ -566,7 +575,7 @@ class ProjectAnalysis:
         )
 
         MtaResultToCsv.processMtaResultsFiles(
-            os.path.join(mtaResultsDir, ""),  # TODO
+            os.path.join(mtaResultsDir, "output.yaml"),
             os.path.join(mtaResultsDir, "results.csv")
         )
 
@@ -610,14 +619,19 @@ class RecMta:
         cls.logger.info("\tProject pulling location: %s", pullLocation)
         cls.logger.info("\tCleanup pulled projects?: %s", cleanupPulled)
 
-        # TODO:: check inputs, create if necessary
+        # check inputs, create if necessary
+        Path(outputDir).mkdir(parents=True, exist_ok=True)
+        Path(pullLocation).mkdir(parents=True, exist_ok=True)
 
         # initial project analysis
+        projectOutput = os.path.join(outputDir, Path(startProject).name)
+        Path(projectOutput).mkdir(parents=True, exist_ok=True)
+
         projectDeps = ProjectAnalysis.analyzeProject(
             mtaLocation,
             mtaArgs,
             startProject,
-            os.path.join(outputDir, Path(startProject).name),
+            projectOutput,
         )
         cls.logger.info("Finished initial project analysis.")
 
