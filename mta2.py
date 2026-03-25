@@ -209,7 +209,8 @@ class MtaResultToCsv:
                                    help="MTA results yaml file to process. '-' to get from stdin.").completer = argcomplete.completers.FilesCompleter()
         recurseParser.add_argument("--outFile", dest="outFile", nargs="?", default="-",
                                    help="File to output to. '-'(default) to output from stdout.").completer = argcomplete.completers.FilesCompleter()
-        recurseParser.add_argument("--noHeader", dest="noHeader", action="store_true", help="If this should not add csv headers to the resulting CSV document.")
+        recurseParser.add_argument("--noHeader", dest="noHeader", action="store_true",
+                                   help="If this should not add csv headers to the resulting CSV document.")
 
         recurseParser.set_defaults(func=cls.processFromArgs)
 
@@ -482,7 +483,6 @@ class CommandUtils:
                     shell=False,
                     text=True,
                     check=False,
-
                 )
         finally:
             os.chdir(initialD)
@@ -529,18 +529,21 @@ class MtaRunner:
             mtaArgs: list[str]
     ):
         cls.logger.info("Running Mta on project %s", projectLocation)
-        print("Running Mta on project (this can take some time):"+ projectLocation)
+        print("Running Mta on project (this can take some time): " + projectLocation)
+
+        mtaResultsDir = os.path.join(outputDir, "/report")
 
         commandList = [
                           "./mta-cli",
                           "analyze",
                           "--input", projectLocation,
-                          "--output", outputDir,
+                          "--output", mtaResultsDir,
                       ] + mtaArgs
 
         CommandUtils.runCommand(commandList, outputDir, mtaLocation)
 
         cls.logger.info("Finished running mta.")
+        return mtaResultsDir
 
     @classmethod
     def mtaArgsToList(cls, mtaArgs: str) -> list[str]:
@@ -567,7 +570,7 @@ class ProjectAnalysis:
         mtaResultsDir = os.path.join(outputDir, "mtaResults")
         Path(mtaResultsDir).mkdir(parents=True, exist_ok=True)
 
-        MtaRunner.runMta(
+        mtaResultsDir = MtaRunner.runMta(
             mtaLocation,
             projectLocation,
             mtaResultsDir,
@@ -588,6 +591,7 @@ class ProjectAnalysis:
 
         cls.logger.info("Done analyzing project: %s", projectLocation)
         return dependencies
+
 
 class RecMta:
     logger = logging.getLogger("RecMta")
@@ -643,7 +647,6 @@ class RecMta:
     def doRecurseFromArgs(cls, args):
         cls.logger.info("Starting recursive process from args.")
 
-        #TODO:: this
         cls.doRecursiveProjectAnalysis(
             mtaLocation=args.mtaLocation,
             mtaArgs=args.mtaArgs,
