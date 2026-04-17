@@ -478,6 +478,8 @@ class DepTreeCollator:
         """
         cls.logger.info("Processing dependency tree.")
 
+
+
         deps = cls.__readTreeFiles(fileName, directory=directory)
         deps = cls.__collateDeps(deps)
         deps = cls.filterDeps(deps, depRegex)
@@ -615,7 +617,8 @@ class MtaRunner:
             mtaLocation: str,
             projectLocation: str,
             outputDir: str,
-            mtaArgs: list[str]
+            mtaArgs: list[str],
+            mtaIncidentSelect: str = None
     ):
         cls.logger.info("Running Mta on project %s", projectLocation)
         print("Running Mta on project (this can take some time): " + projectLocation)
@@ -623,12 +626,17 @@ class MtaRunner:
         mtaResultsDir = cls.getMtaReportDir(outputDir)
 
         commandList = [
-                          "./mta-cli",
-                          "analyze",
-                          "--input", projectLocation,
-                          "--output", mtaResultsDir,
-                          "--mode", "source-only",
-                      ] + mtaArgs
+            "./mta-cli",
+            "analyze",
+            "--input", projectLocation,
+            "--output", mtaResultsDir,
+            "--no-cleanup",
+            "--mode", "source-only",
+        ]
+        if mtaIncidentSelect:
+            commandList.append("--incident-selector")
+            commandList.append(mtaIncidentSelect)
+        commandList += mtaArgs
 
         CommandUtils.runCommand(commandList, outputDir, mtaLocation)
 
@@ -642,64 +650,59 @@ class MtaRunner:
 
 class GitPuller:
     logger = logging.getLogger("GitPuller")
-    gitMapFileName = "gitDepMap.json"
     depsProcessedInRun = []
 
     @classmethod
-    def __getGitDepMapFile(cls):
-        return cls.gitMapFileName
-
-    @classmethod
-    def initGitDepMap(cls):
+    def initGitDepMap(cls, gitMapFileName:str):
         cls.logger.info("Initializing git dependency map.")
 
-        if os.path.exists(cls.__getGitDepMapFile()):
+        if os.path.exists(gitMapFileName):
             cls.logger.debug("Git dependency map already exists.")
             return
 
-        with open(cls.__getGitDepMapFile(), "w") as gitMapFile:
+        with open(gitMapFileName, "w") as gitMapFile:
             gitMapFile.write("{}")
         cls.logger.info("Initialized new git dependency map.")
 
     @classmethod
-    def readGitDepMap(cls):
+    def readGitDepMap(cls, gitMapFileName):
         cls.logger.debug("Reading git dependency map.")
-        with open(cls.__getGitDepMapFile(), 'r') as file:
+        with open(gitMapFileName, 'r') as file:
             return json.load(file)
 
     @classmethod
-    def saveGitDepMap(cls, depMap: dict):
+    def saveGitDepMap(cls, gitMapFileName, depMap: dict):
         cls.logger.debug("Saving git dependency map to file.")
-        with open(cls.__getGitDepMapFile(), 'w') as file:
+        with open(gitMapFileName, 'w') as file:
             return json.dump(depMap, file, indent=4)
 
     @classmethod
-    def haveGitInfoForDep(cls, dep):
+    def haveGitInfoForDep(cls, gitMapFileName, dep):
         cls.logger.debug("Checking for git.")
-        return dep in cls.readGitDepMap()
+        return dep in cls.readGitDepMap(gitMapFileName)
 
     @classmethod
-    def ensureDepEntryExists(cls, dep) -> dict:
-        gitDepMap = cls.readGitDepMap()
+    def ensureDepEntryExists(cls, gitMapFileName, dep) -> dict:
+        gitDepMap = cls.readGitDepMap(gitMapFileName)
 
-        if dep in cls.readGitDepMap():
+        if dep in cls.readGitDepMap(gitMapFileName):
             return gitDepMap
         gitDepMap[dep] = {
             "type": "skip"
         }
-        cls.saveGitDepMap(gitDepMap)
+        cls.saveGitDepMap(gitMapFileName, gitDepMap)
         return gitDepMap
 
     @classmethod
-    def setSkipDep(cls, dep):
+    def setSkipDep(cls, gitMapFileName, dep):
         cls.logger.debug("Setting skip flag for git dependency.")
-        gitDepMap = cls.ensureDepEntryExists(dep)
+        gitDepMap = cls.ensureDepEntryExists(gitMapFileName, dep)
 
         gitDepMap[dep]["type"] = "skip"
-        cls.saveGitDepMap(gitDepMap)
+        cls.saveGitDepMap(gitMapFileName, gitDepMap)
 
     @classmethod
-    def checkGetDepGitInfo(cls, dependencies: dict):
+    def checkGetDepGitInfo(cls, gitMapFileName, dependencies: dict):
         cls.logger.debug("Checking for git dependency info. Getting git info from user if not existent.")
         depList = list(dependencies.keys())
 
@@ -728,7 +731,7 @@ class GitPuller:
                 print()
 
             cls.logger.info("Checking git dependency info for dependency: %s", curDep)
-            gitDepMap = cls.ensureDepEntryExists(curDep)
+            gitDepMap = cls.ensureDepEntryExists(gitMapFileName, curDep)
 
             print("Dependency: " + curDep)
 
@@ -737,7 +740,7 @@ class GitPuller:
                 print("\t\t" + curDepFile)
             print()
 
-            if cls.haveGitInfoForDep(curDep):
+            if cls.haveGitInfoForDep(gitMapFileName, curDep):
                 cls.logger.info("Had git dependency info for dependency: %s / %s", curDep, gitDepMap[curDep])
 
                 print("Git setup for dependency already defined. Info:")
@@ -759,28 +762,27 @@ class GitPuller:
                 cls.logger.info("User chose to skip dependency: %s", curDep)
             elif gitDepMap[curDep]["type"] == "clone":
                 gitDepMap[curDep]["repo"] = Utils.getStringInput("Enter the git repo url")
-                gitDepMap[curDep]["checkout"] = Utils.getStringInput(
-                    "Enter the branch/ checkout name to use (blank to use default branch)")
+                gitDepMap[curDep]["checkout"] = Utils.getStringInput("Enter the branch/ checkout name to use (blank to use default branch)")
+                gitDepMap[curDep]["subDir"] = Utils.getStringInput("Enter the sub directory in the repo the project is placed in (blank for project root)")
             elif gitDepMap[curDep]["type"] == "localDir":
                 gitDepMap[curDep]["localDir"] = Utils.getStringInput("Enter the local directory where the code exists")
-                gitDepMap[curDep]["checkout"] = Utils.getStringInput(
-                    "Enter the branch/ checkout name to use (blank to not checkout)")
+                gitDepMap[curDep]["checkout"] = Utils.getStringInput("Enter the branch/ checkout name to use (blank to not checkout)")
 
             cls.logger.info("Got dependency info from user: %s -> %s", curDep, gitDepMap[curDep])
             # gitDepMap[curDep]["repo"] = Utils.getStringInput("Enter the git repo url")
-            cls.saveGitDepMap(gitDepMap)
+            cls.saveGitDepMap(gitMapFileName, gitDepMap)
             cls.depsProcessedInRun.append(curDep)
 
         cls.logger.info("Finished getting git dependency info from user.")
         print("Completed getting this round of dependency info.")
 
     @classmethod
-    def setupDepDir(cls, dep, pullDir="./") -> str:
+    def setupDepDir(cls, gitMapFileName, dep, pullDir="./") -> str:
         cls.logger.info("Checking out dependency: %s", dep)
 
         depDir = os.path.join(pullDir, dep)
 
-        depInfo = cls.readGitDepMap()[dep]
+        depInfo = cls.readGitDepMap(gitMapFileName)[dep]
 
         if depInfo["type"] == "clone":
             cls.logger.info("Clone dependency: %s", dep)
@@ -789,11 +791,15 @@ class GitPuller:
             if depInfo["checkout"]:
                 repo.git.checkout("HEAD", b=depInfo["checkout"])
             depDir = repo.working_tree_dir
+
+            if depInfo["subDir"]:
+                depDir = os.path.join(depDir, depInfo["subDir"])
+
         elif depInfo["type"] == "localDir":
             cls.logger.info("Using existing local dependency source: %s", dep)
             depDir = depInfo["localDir"]
-            repo = Repo(depDir)
             if depInfo["checkout"]:
+                repo = Repo(depDir)
                 repo.git.checkout("HEAD", b=depInfo["checkout"])
 
         cls.logger.debug("Resulting dir to analyze: %s", depDir)
@@ -810,7 +816,8 @@ class ProjectAnalysis:
             mtaArgs: list[str],
             projectLocation: str,
             outputDir: str,
-            depRegex: re.Pattern = None
+            depRegex: re.Pattern = None,
+            mtaIncidentSelect: str = None
     ) -> dict:
         cls.logger.info("Analyzing project: %s", projectLocation)
         startTime = time.perf_counter()
@@ -841,7 +848,8 @@ class ProjectAnalysis:
                 mtaLocation,
                 projectLocation,
                 mtaResultsDir,
-                mtaArgs
+                mtaArgs,
+                mtaIncidentSelect=mtaIncidentSelect
             )
 
             MtaResultToCsv.processMtaResultsFiles(
@@ -872,6 +880,13 @@ class RecMta:
     logger = logging.getLogger("RecMta")
 
     @classmethod
+    def __updateDepLists(cls, depsToAnalyze: list, depsAnalyzed: set, newDeps, curDep: str):
+        depsAnalyzed.add(curDep)
+        for curNewDep in newDeps.keys():
+            if curNewDep not in depsAnalyzed:
+                depsToAnalyze.append(curNewDep)
+
+    @classmethod
     def doRecursiveProjectAnalysis(
             cls,
             mtaLocation: str,
@@ -879,10 +894,13 @@ class RecMta:
             startProject: str,
             outputDir: str = "./mta2AnalysisResults",
             projectGitMap: str = "./mta2ProjectGitMap.json",
+            finishedSetFile: str = "./finishedProjects.json",
             pullLocation: str = "./mta2PulledProjects",
             cleanupPulled: bool = False,
             overwrite: bool = False,
-            depRegex: re.Pattern = None
+            depRegex: re.Pattern = None,
+            depsMode: str = "decompile",
+            mtaIncidentSelect: str = None,
     ):
         # convert to use only absolute paths
         mtaLocation = os.path.abspath(mtaLocation)
@@ -922,7 +940,7 @@ class RecMta:
         Path(outputDir).mkdir(parents=True, exist_ok=True)
         Path(pullLocation).mkdir(parents=True, exist_ok=True)
 
-        GitPuller.initGitDepMap()
+        GitPuller.initGitDepMap(projectGitMap)
 
         # initial project analysis
         print("Processing initial project: " + startProject)
@@ -934,46 +952,81 @@ class RecMta:
             mtaArgs,
             startProject,
             projectOutput,
-            depRegex=depRegex
+            depRegex=depRegex,
+            mtaIncidentSelect=mtaIncidentSelect
         )
         cls.logger.info("Finished initial project analysis.")
         cls.logger.debug("Initial project dependencies: %s", projectDeps)
-
-        GitPuller.checkGetDepGitInfo(projectDeps)
 
         # deps object keys are the deps to care about
         depsToAnalyze = list(projectDeps.keys())
         depsAnalyzed = set()
 
-        while len(depsToAnalyze) != 0:
-            cls.logger.info("Num Dependencies left to proces: %s", len(depsToAnalyze))
-            cls.logger.debug("Dependencies left to proces: %s", depsToAnalyze)
+        if depsMode == "decompile":
+            cls.logger.info("Processing deps by MTA's decompilation functionality.")
 
-            curDep = depsToAnalyze.pop()
-            cls.logger.info("Processing dependency: %s", curDep)
+            if os.path.exists(finishedSetFile):
+                with open(finishedSetFile, 'r') as f:
+                    depsAnalyzed = set(json.load(f))
 
-            pulledProject = GitPuller.setupDepDir(curDep, pullLocation)
 
-            projectOutput = os.path.join(outputDir, Path(curDep).name)
-            Path(projectOutput).mkdir(parents=True, exist_ok=True)
+            while len(depsToAnalyze) != 0:
+                curDep = depsToAnalyze.pop()
 
-            projectDeps = ProjectAnalysis.analyzeProject(
-                mtaLocation,
-                mtaArgs,
-                pulledProject,
-                projectOutput,
-                depRegex=depRegex
-            )
+                cls.logger.info("Processing dependency: %s", curDep)
+                cls.logger.info("Num Dependencies left to proces: %s", len(depsToAnalyze))
+                cls.logger.debug("Dependencies left to proces: %s", depsToAnalyze)
 
-            cls.logger.info("Finished dependency: %s", curDep)
+                depOutputDir = os.path.join(outputDir, curDep)
 
-            GitPuller.checkGetDepGitInfo(projectDeps)
+                curDepIncidentSelect = ""
+                if mtaIncidentSelect:
+                    curDepIncidentSelect += mtaIncidentSelect + " && "
 
-            # populate dep lists
-            depsAnalyzed.add(curDep)
-            for curDep in projectDeps.keys():
-                if curDep not in depsAnalyzed:
-                    depsToAnalyze.append(curDep)
+                depParts = curDep.split(":")
+                curDepIncidentSelect += "package=" + depParts[0] + "." + depParts[1]
+
+                curDepDeps = ProjectAnalysis.analyzeProject(
+                    mtaLocation,
+                    mtaArgs,
+                    startProject,
+                    depOutputDir,
+                    depRegex=depRegex,
+                    mtaIncidentSelect=curDepIncidentSelect
+                )
+
+                cls.__updateDepLists(depsToAnalyze, depsAnalyzed, curDepDeps, curDep)
+                with open(finishedSetFile, 'w') as f:
+                    json.dump(list(depsAnalyzed), f)
+
+        elif depsMode == "pullSource":
+            cls.logger.info("Processing deps by pulling project sources.")
+            GitPuller.checkGetDepGitInfo(projectGitMap, projectDeps)
+            while len(depsToAnalyze) != 0:
+                cls.logger.info("Num Dependencies left to proces: %s", len(depsToAnalyze))
+                cls.logger.debug("Dependencies left to proces: %s", depsToAnalyze)
+
+                curDep = depsToAnalyze.pop()
+                cls.logger.info("Processing dependency: %s", curDep)
+
+                pulledProject = GitPuller.setupDepDir(curDep, pullLocation)
+
+                projectOutput = os.path.join(outputDir, Path(curDep).name)
+                Path(projectOutput).mkdir(parents=True, exist_ok=True)
+
+                projectDeps = ProjectAnalysis.analyzeProject(
+                    mtaLocation,
+                    mtaArgs,
+                    pulledProject,
+                    projectOutput,
+                    depRegex=depRegex
+                )
+
+                cls.logger.info("Finished dependency: %s", curDep)
+
+                GitPuller.checkGetDepGitInfo(projectGitMap, projectDeps)
+
+                cls.__updateDepLists(depsToAnalyze, depsAnalyzed, projectDeps, curDep)
 
         cls.logger.info("Finished MTA recursive project analysis.")
 
@@ -991,7 +1044,9 @@ class RecMta:
                 pullLocation=args.pullLocation,
                 cleanupPulled=args.cleanupPulled,
                 overwrite=args.overwrite,
-                depRegex=args.dependencyRegex
+                depRegex=args.dependencyRegex,
+                depsMode=args.depsMode,
+                mtaIncidentSelect=args.mtaIncidentSelect
             )
         except Exception as e:
             cls.logger.exception("FAILED to run recursive MTA analysis: %s", e)
@@ -1017,6 +1072,11 @@ class RecMta:
                                    help="If this should remove pulled projects after the run is complete.")
         recurseParser.add_argument("--overwrite", dest="overwrite", action="store_true",
                                    help="If this should overwrite existing analysis (if exists).")
+        recurseParser.add_argument("--depsMode", dest="depsMode", nargs="?", default="decompile",
+                                   choices=["decompile", "pullSource"],
+                                   help="How we should handle dependency scanning.")
+        recurseParser.add_argument("--mtaIncidentSelect", dest="mtaIncidentSelect", nargs="?", default="",
+                                   help="How we should handle dependency scanning.")
 
         recurseParser.add_argument("--mtaLocation", dest="mtaLocation",
                                    help="The directory in which the MTA tool was extracted from.")
