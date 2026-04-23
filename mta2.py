@@ -363,11 +363,11 @@ class DepTreeCollator:
         Schema of output::
 
             {
-                "<dependency>": [
+                "<dependency>": {
                     "files": [
                       // ... list of files the dependency is featured in
                     ]
-                ]
+                }
                 // ... foreach file found
             }
 
@@ -453,9 +453,78 @@ class DepTreeCollator:
 
     @classmethod
     def filterDeps(cls, deps: dict, depRegex: re.Pattern = None) -> dict:
-        if filter is None:
+        if depRegex is None:
             return deps
+        cls.logger.debug("Filtering dependencies with: %s", depRegex)
         return {k: v for k, v in deps.items() if re.search(depRegex, k)}
+
+    @classmethod
+    def __processGradleDep(cls, depLine)->str:
+        cls.logger.debug("Found dependency: %s", depLine)
+
+        if "{strictly " in depLine:
+            depLine = depLine.replace("{strictly ", "")
+            depLine = depLine.replace("}", "")
+
+        depParts = depLine.split()
+        dep = ""
+
+        if depParts[-1] in ["(*)", "(c)", "(n)"]:
+            depParts.pop()
+
+        actualVersion = None
+
+        if "->" in depParts:
+            actualVersion = depParts.pop()
+            depParts.pop()
+
+        dep = depParts.pop()
+
+        if actualVersion:
+            cls.logger.debug("Found actual version of %s: %s", dep, actualVersion)
+            depParts = dep.split(":")
+            depParts[1] = actualVersion
+            dep = ":".join(depParts)
+
+        return dep
+
+
+
+    @classmethod
+    def __getGradleDeps(cls, project):
+        """
+        Collated the raw dependencies from :meth:`.readTreeFiles`.
+
+        Schema of output::
+
+            {
+                "<dependency>": {
+                    "files": [
+                      // ... list of files the dependency is featured in
+                    ]
+                }
+                // ... foreach file found
+            }
+        """
+
+        (cmdComplete, outputFile) = CommandUtils.runCommand(["./gradlew", "dependencies", "-q"], "/tmp/", project)
+
+        cls.logger.info("Parsing dependencies from gradle output.")
+        cls.logger.debug("Gradle dependency output: %s", outputFile)
+
+        output = {}
+
+        with open(outputFile, 'r') as file:
+            for line in file:
+                line = line.strip()
+                dep = None
+                if line.startswith("|") or line.startswith("+") or line.startswith("\\"):
+                    dep = cls.__processGradleDep(line)
+
+                if dep:
+                    if dep not in output:
+                        output[dep] = {"files": []}
+        return output
 
     @classmethod
     def process(
@@ -478,10 +547,20 @@ class DepTreeCollator:
         """
         cls.logger.info("Processing dependency tree.")
 
+        deps = None
 
+        if ProjectUtils.isMvnProject(directory):
+            cls.logger.info("Processing dependency tree for maven project.")
+            deps = cls.__readTreeFiles(fileName, directory=directory)
+            deps = cls.__collateDeps(deps)
+        elif ProjectUtils.isGradleProject(directory):
+            cls.logger.info("Processing dependency tree for gradle project.")
+            deps = cls.__getGradleDeps(directory)
+        else:
+            raise Exception("Project was neither a maven project nor a gradle project.")
 
-        deps = cls.__readTreeFiles(fileName, directory=directory)
-        deps = cls.__collateDeps(deps)
+        cls.logger.debug("Unfiltered dependencies: %s", deps)
+
         deps = cls.filterDeps(deps, depRegex)
         if outFile is not None:
             cls.__outputResult(deps, outFile, outFormat)
@@ -539,7 +618,7 @@ class CommandUtils:
             command: list[str],
             outputDir: str,
             runDir: str = "."
-    ) -> subprocess.CompletedProcess:
+    ) -> (subprocess.CompletedProcess, str):
         cls.logger.info("Running command: %s", command[0])
         cls.logger.debug("Full command: %s", command)
         initialD = os.getcwd()
@@ -579,19 +658,44 @@ class CommandUtils:
                 ", exited with " + str(result.returncode) +
                 "  Output sent to logs in " + outputDir
             )
-        return result
+        return (result, stdOutFile)
 
 
-class MvnUtils:
-    logger = logging.getLogger("MtaRunner")
+class ProjectUtils:
+    logger = logging.getLogger("ProjectUtils")
 
     @classmethod
-    def runDepTree(
+    def __projectFileExists(
+            cls,
+            projectDir: str,
+            file: str
+    ) -> bool:
+        return os.path.exists(os.path.join(projectDir, file))
+
+    @classmethod
+    def isMvnProject(
+            cls,
+            projectDir: str
+    )->bool:
+        return cls.__projectFileExists(projectDir, "pom.xml")
+
+    @classmethod
+    def isGradleProject(
+            cls,
+            projectDir: str
+    )->bool:
+        return cls.__projectFileExists(projectDir, "build.gradle")
+
+    @classmethod
+    def runMvnDepTree(
             cls,
             projectDir: str,
             outputDir: str,
             depTreeMvnCmd: str = "org.apache.maven.plugins:maven-dependency-plugin:3.8.1:tree"
     ):
+        if not cls.isMvnProject(projectDir):
+            cls.logger.info("Not a maven project. Skipping running dependency tree.")
+            return
         cls.logger.info("Running Mvn dependency tree for project %s", projectDir)
         CommandUtils.runCommand(
             [
@@ -702,12 +806,39 @@ class GitPuller:
         cls.saveGitDepMap(gitMapFileName, gitDepMap)
 
     @classmethod
-    def checkGetDepGitInfo(cls, gitMapFileName, dependencies: dict):
+    def getDepsNotInMap(cls, gitMapFileName:str, depList:list[str])->list[str]:
+        output = []
+        gitMap = cls.readGitDepMap(gitMapFileName)
+
+        for dep in depList:
+            if dep not in gitMap:
+                output.append(dep)
+        return output
+
+
+    @classmethod
+    def allDepsAlreadyIn(cls, gitMapFileName:str, depList:list[str])->bool:
+        return len(cls.getDepsNotInMap(gitMapFileName, depList)) == 0
+
+    @classmethod
+    def checkGetDepGitInfo(cls, gitMapFileName, dependencies: dict, firstRun=False):
         cls.logger.debug("Checking for git dependency info. Getting git info from user if not existent.")
         depList = list(dependencies.keys())
 
-        firstNotFound = True
+        if cls.allDepsAlreadyIn(gitMapFileName, depList):
+            cls.logger.info("All deps in list already accounted for.")
+            if not Utils.getBoolInput("All deps already have recorded source locations. Would you like to change them?"):
+                cls.logger.info("User chose to use existing locations.")
+                return
+            cls.logger.info("User chose to change locations.")
+        else:
+            depList = cls.getDepsNotInMap(gitMapFileName, depList)
+            cls.logger.info("Some deps not in yet: %s", depList)
+            print()
+            print("Dep list has deps not yet covered:" + "\n\t".join(depList))
+            print()
 
+        firstNotFound = True
         for curDep in depList:
 
             if curDep in cls.depsProcessedInRun:
@@ -786,7 +917,13 @@ class GitPuller:
 
         if depInfo["type"] == "clone":
             cls.logger.info("Clone dependency: %s", dep)
-            repo = Repo.clone_from(depInfo["type"]["repo"], depDir)
+
+            if os.path.exists(depDir):
+                cls.logger.debug("Already cloned")
+                repo = Repo(depDir)
+            else:
+                cls.logger.debug("Cloning")
+                repo = Repo.clone_from(depInfo["repo"], depDir)
 
             if depInfo["checkout"]:
                 repo.git.checkout("HEAD", b=depInfo["checkout"])
@@ -801,6 +938,9 @@ class GitPuller:
             if depInfo["checkout"]:
                 repo = Repo(depDir)
                 repo.git.checkout("HEAD", b=depInfo["checkout"])
+        elif depInfo["type"] == "skip":
+            cls.logger.info("Skipping dependency: %s", dep)
+            return None
 
         cls.logger.debug("Resulting dir to analyze: %s", depDir)
         return depDir
@@ -857,7 +997,7 @@ class ProjectAnalysis:
                 os.path.join(mtaReportDir, "results.csv")
             )
 
-            MvnUtils.runDepTree(projectLocation, outputDir)
+            ProjectUtils.runMvnDepTree(projectLocation, outputDir)
 
             dependencies = DepTreeCollator.process(
                 directory=projectLocation,
@@ -1009,7 +1149,10 @@ class RecMta:
                 curDep = depsToAnalyze.pop()
                 cls.logger.info("Processing dependency: %s", curDep)
 
-                pulledProject = GitPuller.setupDepDir(curDep, pullLocation)
+                pulledProject = GitPuller.setupDepDir(projectGitMap, curDep, pullLocation)
+
+                if not pulledProject:
+                    continue
 
                 projectOutput = os.path.join(outputDir, Path(curDep).name)
                 Path(projectOutput).mkdir(parents=True, exist_ok=True)
